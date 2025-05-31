@@ -7,12 +7,16 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 import config
 from arxiv_client import ArxivPaper
+from semantic_scorer import SemanticScorer
+from citation_analyzer import CitationAnalyzer
 
 logger = logging.getLogger(__name__)
 
 class RelevanceScorer:
-    def __init__(self, keywords: List[str] = None):
+    def __init__(self, keywords: List[str] = None, use_semantic: bool = True, use_citations: bool = True):
         self.keywords = keywords or config.RELEVANCE_KEYWORDS
+        self.use_semantic = use_semantic
+        self.use_citations = use_citations
         self.vectorizer = TfidfVectorizer(
             stop_words='english',
             max_features=1000,
@@ -22,11 +26,33 @@ class RelevanceScorer:
         # Create keyword reference vector
         self.keyword_text = ' '.join(self.keywords)
         
+        # Initialize semantic scorer if requested
+        self.semantic_scorer = None
+        if self.use_semantic:
+            try:
+                self.semantic_scorer = SemanticScorer()
+                logger.info("Semantic scoring enabled with sentence transformers")
+            except Exception as e:
+                logger.warning(f"Failed to initialize semantic scorer: {e}")
+                logger.info("Falling back to TF-IDF only")
+                self.use_semantic = False
+        
+        # Initialize citation analyzer if requested
+        self.citation_analyzer = None
+        if self.use_citations:
+            try:
+                self.citation_analyzer = CitationAnalyzer()
+                logger.info("Citation analysis enabled")
+            except Exception as e:
+                logger.warning(f"Failed to initialize citation analyzer: {e}")
+                self.use_citations = False
+        
         if logger.isEnabledFor(logging.DEBUG):
             assert self.keywords, "Keywords list should not be empty"
             assert len(self.keywords) > 0, f"Need at least one keyword, got {len(self.keywords)}"
         
-        logger.info(f"Initialized relevance scorer with {len(self.keywords)} keywords")
+        logger.info(f"Initialized relevance scorer with {len(self.keywords)} keywords "
+                   f"(semantic: {self.use_semantic}, citations: {self.use_citations})")
     
     def score_paper(self, paper: ArxivPaper) -> float:
         """Calculate relevance score for a paper (0-1)"""
@@ -44,14 +70,22 @@ class RelevanceScorer:
         # Calculate different scoring components
         keyword_score = self._calculate_keyword_score(text_content)
         category_score = self._calculate_category_score(paper.categories)
-        semantic_score = self._calculate_semantic_score(text_content)
         
-        # Weighted combination of scores
-        weights = {
-            'keyword': 0.4,
-            'category': 0.3,
-            'semantic': 0.3
-        }
+        # Use enhanced semantic scoring if available
+        if self.use_semantic and self.semantic_scorer:
+            semantic_score = self.semantic_scorer.score_paper_semantic(paper)
+            weights = {
+                'keyword': 0.3,
+                'category': 0.25,
+                'semantic': 0.45  # Higher weight for better semantic understanding
+            }
+        else:
+            semantic_score = self._calculate_semantic_score(text_content)
+            weights = {
+                'keyword': 0.4,
+                'category': 0.3,
+                'semantic': 0.3
+            }
         
         final_score = (
             weights['keyword'] * keyword_score +
@@ -137,26 +171,73 @@ class RelevanceScorer:
             return 0.0
     
     def score_papers_batch(self, papers: List[ArxivPaper]) -> List[float]:
-        """Score multiple papers efficiently"""
+        """Score multiple papers efficiently with enhanced semantic and citation analysis"""
         if not papers:
             return []
         
-        logger.info(f"Scoring {len(papers)} papers")
+        logger.info(f"Scoring {len(papers)} papers with enhanced algorithms")
         
-        scores = []
-        for paper in papers:
+        # Calculate base scores efficiently
+        if self.use_semantic and self.semantic_scorer:
+            # Use batch semantic scoring for efficiency
+            logger.info("Using batch semantic scoring")
+            semantic_scores = self.semantic_scorer.score_papers_batch(papers)
+            
+            scores = []
+            for i, paper in enumerate(papers):
+                try:
+                    text_content = f"{paper.title} {paper.summary}".lower()
+                    if not text_content.strip():
+                        scores.append(0.0)
+                        continue
+                    
+                    keyword_score = self._calculate_keyword_score(text_content)
+                    category_score = self._calculate_category_score(paper.categories)
+                    semantic_score = semantic_scores[i]
+                    
+                    # Enhanced weights for semantic scoring
+                    weights = {
+                        'keyword': 0.3,
+                        'category': 0.25,
+                        'semantic': 0.45
+                    }
+                    
+                    final_score = (
+                        weights['keyword'] * keyword_score +
+                        weights['category'] * category_score +
+                        weights['semantic'] * semantic_score
+                    )
+                    
+                    final_score = max(0.0, min(1.0, final_score))
+                    scores.append(final_score)
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to score paper {paper.id}: {e}")
+                    scores.append(0.0)
+        else:
+            # Fallback to individual scoring
+            scores = []
+            for paper in papers:
+                try:
+                    score = self.score_paper(paper)
+                    scores.append(score)
+                except Exception as e:
+                    logger.warning(f"Failed to score paper {paper.id}: {e}")
+                    scores.append(0.0)
+        
+        # Enhance with citation analysis if enabled
+        if self.use_citations and self.citation_analyzer and len(papers) > 1:
+            logger.info("Enhancing scores with citation network analysis")
             try:
-                score = self.score_paper(paper)
-                scores.append(score)
+                scores = self.citation_analyzer.enhance_relevance_with_citations(papers, scores)
             except Exception as e:
-                logger.warning(f"Failed to score paper {paper.id}: {e}")
-                scores.append(0.0)
+                logger.warning(f"Citation analysis failed, using base scores: {e}")
         
         if logger.isEnabledFor(logging.DEBUG):
             assert len(scores) == len(papers), f"Score count mismatch: {len(scores)} vs {len(papers)}"
         
         avg_score = np.mean(scores) if scores else 0.0
-        logger.info(f"Batch scoring complete. Average score: {avg_score:.3f}")
+        logger.info(f"Enhanced batch scoring complete. Average score: {avg_score:.3f}")
         
         return scores
     

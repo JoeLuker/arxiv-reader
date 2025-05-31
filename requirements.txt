@@ -5,3 +5,5 @@ numpy
 scikit-learn
 beautifulsoup4
 lxml
+sentence-transformers
+torch
