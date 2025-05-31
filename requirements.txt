@@ -1,0 +1,7 @@
+requests
+feedparser
+python-dateutil
+numpy
+scikit-learn
+beautifulsoup4
+lxml
