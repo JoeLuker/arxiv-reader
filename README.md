@@ -7,7 +7,7 @@ A Python tool to automatically discover, score, and store relevant research pape
 - **Automated Discovery**: Fetches recent papers from arXiv based on configurable categories and keywords
 - **Relevance Scoring**: Uses keyword matching, category filtering, and semantic analysis to score paper relevance
 - **Local Storage**: Stores papers in a SQLite database with metadata and relevance scores
-- **Paper Management**: Mark papers as read, star favorites, and add notes
+- **Paper Management**: Mark papers as read and star favorites
 - **Search Functionality**: Search for specific papers and topics
 - **Configurable**: Easily customize keywords, categories, and scoring thresholds
 
@@ -69,7 +69,7 @@ python main.py mark PAPER_ID unstar
    - **Category Scoring**: Relevance based on arXiv subject categories
    - **Semantic Similarity**: TF-IDF cosine similarity between paper content and keywords
 3. **Storage**: Papers above the relevance threshold are stored with metadata
-4. **Management**: Track reading status, star favorites, and add personal notes
+4. **Management**: Track reading status and star favorites
 
 ## Database Schema
 
@@ -77,7 +77,7 @@ Papers are stored with the following fields:
 - Paper ID, title, summary, authors
 - Publication dates and arXiv categories
 - Relevance score and added date
-- Reading status, starred status, and personal notes
+- Reading status and starred status
 
 ## Logging
 
