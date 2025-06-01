@@ -22,7 +22,9 @@ import json
 from pymongo import MongoClient
 from minio import Minio
 from minio.error import S3Error
-from elasticsearch import Elasticsearch
+import zincsearch_sdk
+from zincsearch_sdk.api import document, index, search
+from zincsearch_sdk.model.meta_zinc_query import MetaZincQuery
 import tika
 from tika import parser as tika_parser
 
@@ -54,17 +56,21 @@ class DocumentStore:
         self.mongo_client = MongoClient(mongo_uri)
         self.db = self.mongo_client[self.config['mongodb']['database']]
         
-        # Initialize Elasticsearch client
-        self.es_client = Elasticsearch(
-            [f"http://{self.config['elasticsearch']['host']}:{self.config['elasticsearch']['port']}"],
-            basic_auth=(self.config['elasticsearch'].get('username'), 
-                       self.config['elasticsearch'].get('password')) if self.config['elasticsearch'].get('username') else None
+        # Initialize ZincSearch client
+        zinc_config = zincsearch_sdk.Configuration(
+            host=f"http://{self.config['zincsearch']['host']}:{self.config['zincsearch']['port']}",
+            username=self.config['zincsearch']['username'],
+            password=self.config['zincsearch']['password']
         )
+        self.zinc_api_client = zincsearch_sdk.ApiClient(zinc_config)
+        self.zinc_document_api = document.Document(self.zinc_api_client)
+        self.zinc_index_api = index.Index(self.zinc_api_client)
+        self.zinc_search_api = search.Search(self.zinc_api_client)
         
         # Ensure bucket exists
         self._ensure_bucket_exists()
         
-        # Ensure Elasticsearch index exists
+        # Ensure ZincSearch index exists
         self._ensure_index_exists()
         
         logger.info("Document store initialized successfully")
@@ -86,11 +92,11 @@ class DocumentStore:
                 'password': os.getenv('MONGO_PASSWORD', 'arxivpass123'),
                 'database': 'arxiv_papers'
             },
-            'elasticsearch': {
-                'host': os.getenv('ELASTIC_HOST', 'localhost'),
-                'port': int(os.getenv('ELASTIC_PORT', '9200')),
-                'username': os.getenv('ELASTIC_USER', ''),
-                'password': os.getenv('ELASTIC_PASSWORD', '')
+            'zincsearch': {
+                'host': os.getenv('ZINC_HOST', 'localhost'),
+                'port': int(os.getenv('ZINC_PORT', '4080')),
+                'username': os.getenv('ZINC_USER', 'arxivadmin'),
+                'password': os.getenv('ZINC_PASSWORD', 'zincsearch123')
             },
             'tika': {
                 'endpoint': os.getenv('TIKA_ENDPOINT', 'http://localhost:9998')
@@ -107,24 +113,13 @@ class DocumentStore:
             logger.error(f"Error checking/creating bucket: {e}")
     
     def _ensure_index_exists(self):
-        """Ensure Elasticsearch index exists with proper mappings"""
+        """Ensure ZincSearch index exists"""
         try:
-            if not self.es_client.indices.exists(index='arxiv-papers'):
-                mappings = {
-                    'properties': {
-                        'arxiv_id': {'type': 'keyword'},
-                        'title': {'type': 'text'},
-                        'abstract': {'type': 'text'},
-                        'authors': {'type': 'keyword'},
-                        'categories': {'type': 'keyword'},
-                        'full_text': {'type': 'text'},
-                        'indexed_date': {'type': 'date'}
-                    }
-                }
-                self.es_client.indices.create(index='arxiv-papers', mappings=mappings)
-                logger.info("Created Elasticsearch index: arxiv-papers")
+            # ZincSearch creates indices automatically when documents are indexed
+            # We'll let it auto-create for simplicity
+            logger.debug("ZincSearch will auto-create index on first document")
         except Exception as e:
-            logger.error(f"Error creating Elasticsearch index: {e}")
+            logger.error(f"Error ensuring ZincSearch index: {e}")
     
     def download_and_store_pdf(self, arxiv_id: str, pdf_url: str) -> Dict[str, Any]:
         """Download PDF from ArXiv and store in MinIO"""
@@ -186,7 +181,7 @@ class DocumentStore:
                 upsert=True
             )
             
-            # Index in Elasticsearch for search
+            # Index in ZincSearch for search
             self._index_document(arxiv_id, full_text, metadata)
             
             logger.info(f"Successfully stored PDF and extracted text for {arxiv_id}")
@@ -208,66 +203,95 @@ class DocumentStore:
             }
     
     def _index_document(self, arxiv_id: str, full_text: str, metadata: Dict[str, Any]):
-        """Index document in Elasticsearch"""
+        """Index document in ZincSearch"""
         try:
-            # Get paper metadata from MongoDB
+            # Get paper metadata from MongoDB first
             paper = self.db.papers.find_one({'arxiv_id': arxiv_id})
+            if not paper:
+                # Try looking by 'id' field (from SQLite migration)
+                paper = self.db.papers.find_one({'id': arxiv_id})
+            
+            # If not in MongoDB, try SQLite database for backward compatibility
+            if not paper:
+                try:
+                    import sqlite3
+                    import config
+                    conn = sqlite3.connect(config.DB_PATH)
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.execute("SELECT * FROM papers WHERE id = ?", (arxiv_id,))
+                    row = cursor.fetchone()
+                    if row:
+                        paper = dict(row)
+                        paper['authors'] = json.loads(paper['authors'])
+                        paper['categories'] = json.loads(paper['categories'])
+                        paper['abstract'] = paper.get('summary', '')
+                    conn.close()
+                except Exception as e:
+                    logger.warning(f"Could not fetch from SQLite: {e}")
             
             doc = {
                 'arxiv_id': arxiv_id,
                 'title': paper.get('title', '') if paper else '',
                 'abstract': paper.get('abstract', '') if paper else '',
-                'authors': paper.get('authors', []) if paper else [],
-                'categories': paper.get('categories', []) if paper else [],
+                'authors': ' '.join(paper.get('authors', [])) if paper and isinstance(paper.get('authors'), list) else '',
+                'categories': ' '.join(paper.get('categories', [])) if paper and isinstance(paper.get('categories'), list) else '',
                 'full_text': full_text,
-                'pdf_metadata': metadata,
+                'pdf_metadata': json.dumps(metadata),
                 'indexed_date': datetime.utcnow().isoformat()
             }
             
-            self.es_client.index(
-                index='arxiv-papers',
-                id=arxiv_id,
-                document=doc
-            )
+            # ZincSearch bulk format
+            bulk_data = f'{{"index": {{"_index": "arxiv-papers", "_id": "{arxiv_id}"}}}}\n{json.dumps(doc)}\n'
             
-            logger.info(f"Indexed {arxiv_id} in Elasticsearch")
+            self.zinc_document_api.bulk(query=bulk_data)
+            
+            logger.info(f"Indexed {arxiv_id} in ZincSearch")
             
         except Exception as e:
             logger.error(f"Error indexing document {arxiv_id}: {e}")
     
     def search_full_text(self, query: str, size: int = 10) -> List[Dict[str, Any]]:
-        """Search full text of papers using Elasticsearch"""
+        """Search full text of papers using ZincSearch"""
         try:
-            body = {
-                'query': {
-                    'multi_match': {
-                        'query': query,
-                        'fields': ['title^3', 'abstract^2', 'full_text'],
-                        'type': 'best_fields'
-                    }
+            # Use direct HTTP request since the SDK has issues with the search format
+            import requests
+            import base64
+            
+            auth_string = f"{self.config['zincsearch']['username']}:{self.config['zincsearch']['password']}"
+            auth_bytes = auth_string.encode('ascii')
+            auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
+            
+            search_data = {
+                "search_type": "querystring",
+                "query": {
+                    "term": query
                 },
-                'size': size,
-                'highlight': {
-                    'fields': {
-                        'full_text': {
-                            'fragment_size': 150,
-                            'number_of_fragments': 3
-                        }
-                    }
-                }
+                "from": 0,
+                "size": size
             }
             
-            response = self.es_client.search(index='arxiv-papers', body=body)
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Basic {auth_b64}"
+            }
+            
+            url = f"http://{self.config['zincsearch']['host']}:{self.config['zincsearch']['port']}/api/arxiv-papers/_search"
+            response = requests.post(url, json=search_data, headers=headers)
+            response.raise_for_status()
+            
+            search_results = response.json()
             
             results = []
-            for hit in response['hits']['hits']:
-                result = {
-                    'arxiv_id': hit['_source']['arxiv_id'],
-                    'title': hit['_source']['title'],
-                    'score': hit['_score'],
-                    'highlights': hit.get('highlight', {}).get('full_text', [])
-                }
-                results.append(result)
+            if 'hits' in search_results and 'hits' in search_results['hits']:
+                for hit in search_results['hits']['hits']:
+                    source = hit.get('_source', {})
+                    result = {
+                        'arxiv_id': source.get('arxiv_id', ''),
+                        'title': source.get('title', ''),
+                        'score': hit.get('_score', 0),
+                        'highlights': []  # Can be added later if needed
+                    }
+                    results.append(result)
             
             return results
             
@@ -323,11 +347,12 @@ class DocumentStore:
                 'full_text_count': self.db.full_text.count_documents({})
             }
             
-            # Get Elasticsearch stats
+            # Get ZincSearch stats
             try:
-                es_count = self.es_client.count(index='arxiv-papers')['count']
+                zinc_response = self.zinc_index_api.get_mapping(index='arxiv-papers')
+                zinc_count = zinc_response.mapping.get('num_docs', 0) if zinc_response else 0
             except Exception:
-                es_count = 0
+                zinc_count = 0
             
             return {
                 'minio': {
@@ -335,8 +360,8 @@ class DocumentStore:
                     'total_size_mb': round(total_size / (1024 * 1024), 2)
                 },
                 'mongodb': mongo_stats,
-                'elasticsearch': {
-                    'indexed_documents': es_count
+                'zincsearch': {
+                    'indexed_documents': zinc_count
                 }
             }
             

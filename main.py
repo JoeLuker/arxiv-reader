@@ -313,7 +313,7 @@ def main():
                 print(f"  PDFs downloaded: {stats['documents']['mongodb']['pdfs_count']}")
                 print(f"  Download percentage: {stats['download_percentage']}%")
                 print(f"  Total storage: {stats['documents']['minio']['total_size_mb']:.1f} MB")
-                print(f"  Indexed documents: {stats['documents']['elasticsearch']['indexed_documents']}")
+                print(f"  Indexed documents: {stats['documents']['zincsearch']['indexed_documents']}")
                 
             else:
                 pdf_parser.print_help()

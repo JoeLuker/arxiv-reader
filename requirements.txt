@@ -10,5 +10,5 @@ torch
 black
 pymongo
 minio
-elasticsearch
+zincsearch-sdk
 tika
