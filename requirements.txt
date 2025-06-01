@@ -8,3 +8,7 @@ lxml
 sentence-transformers
 torch
 black
+pymongo
+minio
+elasticsearch
+tika

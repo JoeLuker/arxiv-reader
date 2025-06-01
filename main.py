@@ -13,6 +13,7 @@ import config
 from arxiv_client import ArxivClient
 from paper_storage import PaperStorage
 from relevance_scorer import RelevanceScorer
+from pdf_manager import PDFManager
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +193,25 @@ def main():
 
     # Stats command
     subparsers.add_parser("stats", help="Show database statistics")
+    
+    # PDF commands
+    pdf_parser = subparsers.add_parser("pdf", help="Manage PDFs")
+    pdf_subparsers = pdf_parser.add_subparsers(dest="pdf_command", help="PDF commands")
+    
+    # PDF download
+    pdf_download = pdf_subparsers.add_parser("download", help="Download PDFs")
+    pdf_download.add_argument("--min-relevance", type=float, default=0.7,
+                             help="Minimum relevance score (default: 0.7)")
+    pdf_download.add_argument("--limit", type=int, help="Maximum papers to download")
+    pdf_download.add_argument("--arxiv-ids", nargs="+", help="Specific ArXiv IDs")
+    
+    # PDF search
+    pdf_search = pdf_subparsers.add_parser("search", help="Search full text")
+    pdf_search.add_argument("query", help="Search query")
+    pdf_search.add_argument("--size", type=int, default=10, help="Number of results")
+    
+    # PDF stats
+    pdf_subparsers.add_parser("stats", help="Show PDF storage statistics")
 
     # Mark commands
     mark_parser = subparsers.add_parser("mark", help="Mark paper status")
@@ -248,6 +268,55 @@ def main():
                 print(f"Paper {args.paper_id} marked as {args.action}")
             else:
                 print(f"Failed to mark paper {args.paper_id}")
+                
+        elif args.command == "pdf":
+            pdf_manager = PDFManager()
+            
+            if args.pdf_command == "download":
+                if args.arxiv_ids:
+                    results = pdf_manager.download_specific_papers(args.arxiv_ids)
+                else:
+                    results = pdf_manager.download_papers_by_relevance(
+                        min_relevance=args.min_relevance,
+                        limit=args.limit
+                    )
+                
+                print(f"\nPDF Download Summary:")
+                print(f"Total papers: {results['total']}")
+                print(f"Downloaded: {results['downloaded']}")
+                print(f"Failed: {results['failed']}")
+                if 'already_downloaded' in results:
+                    print(f"Already downloaded: {results['already_downloaded']}")
+                    
+            elif args.pdf_command == "search":
+                results = pdf_manager.search_full_text(args.query, args.size)
+                
+                if results:
+                    print(f"\nFound {len(results)} results for '{args.query}':\n")
+                    for i, result in enumerate(results, 1):
+                        print(f"{i}. {result['title']}")
+                        print(f"   ArXiv ID: {result['arxiv_id']}")
+                        print(f"   Score: {result['score']:.2f}")
+                        if result['highlights']:
+                            print("   Highlights:")
+                            for highlight in result['highlights'][:2]:
+                                print(f"   - ...{highlight.strip()}...")
+                        print()
+                else:
+                    print(f"No results found for '{args.query}'")
+                    
+            elif args.pdf_command == "stats":
+                stats = pdf_manager.get_download_stats()
+                
+                print("\n=== PDF Storage Statistics ===")
+                print(f"\nDocument Store:")
+                print(f"  PDFs downloaded: {stats['documents']['mongodb']['pdfs_count']}")
+                print(f"  Download percentage: {stats['download_percentage']}%")
+                print(f"  Total storage: {stats['documents']['minio']['total_size_mb']:.1f} MB")
+                print(f"  Indexed documents: {stats['documents']['elasticsearch']['indexed_documents']}")
+                
+            else:
+                pdf_parser.print_help()
 
     except KeyboardInterrupt:
         print("\nOperation cancelled")

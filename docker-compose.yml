@@ -1,0 +1,97 @@
+version: '3.8'
+
+services:
+  # MinIO - S3-compatible object storage for PDFs
+  minio:
+    image: minio/minio:latest
+    container_name: arxiv-minio
+    ports:
+      - "9000:9000"      # API port
+      - "9001:9001"      # Console port
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    volumes:
+      # Mount your NAS here - adjust path as needed
+      - ${NAS_PATH:-./data/minio}:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - arxiv-network
+
+  # Elasticsearch for full-text search and document metadata
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: arxiv-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - cluster.routing.allocation.disk.threshold_enabled=false
+    ports:
+      - "9200:9200"
+    volumes:
+      # Store ES data on NAS
+      - ${NAS_PATH:-./data/elasticsearch}:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - arxiv-network
+
+  # MongoDB for document metadata and relationships
+  mongodb:
+    image: mongo:7.0
+    container_name: arxiv-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-arxivadmin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-arxivpass123}
+      MONGO_INITDB_DATABASE: arxiv_papers
+    volumes:
+      # Store MongoDB data on NAS
+      - ${NAS_PATH:-./data/mongodb}:/data/db
+      - ./init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
+    networks:
+      - arxiv-network
+
+  # Apache Tika for PDF text extraction
+  tika:
+    image: apache/tika:latest
+    container_name: arxiv-tika
+    ports:
+      - "9998:9998"
+    networks:
+      - arxiv-network
+
+  # Optional: Minio Console for web UI
+  createbuckets:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin123;
+      /usr/bin/mc mb myminio/arxiv-pdfs || true;
+      /usr/bin/mc mb myminio/arxiv-processed || true;
+      /usr/bin/mc policy set public myminio/arxiv-pdfs;
+      exit 0;
+      "
+    networks:
+      - arxiv-network
+
+networks:
+  arxiv-network:
+    driver: bridge
+
+volumes:
+  minio-data:
+  elasticsearch-data:
+  mongodb-data:
